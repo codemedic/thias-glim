@@ -1,0 +1,108 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_GB.UTF-8
+  keyboard:
+    layout: gb
+
+  identity:
+    hostname: dev-host          # TODO: set desired hostname
+    username: engineer          # TODO: set desired username (also update docker group below)
+    password: "REPLACE_WITH_HASH"  # generate with: openssl passwd -6
+
+  # Standard apt packages — installed into the target before late-commands run
+  packages:
+    - build-essential           # gcc, g++, make, libc-dev, etc.
+    - curl
+    - wget
+    - git                       # required by Homebrew
+    - gpg
+    - ca-certificates
+    - flatpak
+    - software-properties-common  # provides add-apt-repository
+    - procps                    # required by Homebrew on Linux
+    - file                      # required by Homebrew on Linux
+
+  late-commands:
+
+    # -------------------------------------------------------------------------
+    # 1. Remove snapd — eliminates Firefox, Thunderbird and any other snaps
+    # -------------------------------------------------------------------------
+    - curtin in-target -- apt-get purge -y snapd
+    - curtin in-target -- apt-mark hold snapd
+
+    # -------------------------------------------------------------------------
+    # 2. Firefox — native .deb via Mozilla Team PPA (replaces snap version)
+    #    Pin priority 1001 ensures apt always prefers this over any snap shim.
+    # -------------------------------------------------------------------------
+    - curtin in-target -- add-apt-repository -y ppa:mozillateam/ppa
+    - |
+      cat <<'EOF' | tee /target/etc/apt/preferences.d/mozilla-firefox
+      Package: firefox*
+      Pin: release o=LP-PPA-mozillateam
+      Pin-Priority: 1001
+      EOF
+    - curtin in-target -- apt-get update
+    - curtin in-target -- apt-get install -y firefox
+
+    # -------------------------------------------------------------------------
+    # 3. Docker CE — official Docker repository
+    #    Uses the target's VERSION_CODENAME so this works across Ubuntu releases.
+    # -------------------------------------------------------------------------
+    - curtin in-target -- install -m 0755 -d /etc/apt/keyrings
+    - curtin in-target -- curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    - curtin in-target -- chmod a+r /etc/apt/keyrings/docker.asc
+    - |
+      . /target/etc/os-release
+      echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+        | tee /target/etc/apt/sources.list.d/docker.list
+    - curtin in-target -- apt-get update
+    - curtin in-target -- apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    - curtin in-target -- usermod -aG docker engineer  # TODO: match username above
+
+    # -------------------------------------------------------------------------
+    # 4. Google Chrome — downloads current stable .deb which also registers
+    #    the Google apt repo, so future updates are handled by apt.
+    # -------------------------------------------------------------------------
+    - curtin in-target -- wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb
+    - curtin in-target -- apt-get install -y /tmp/chrome.deb
+    - curtin in-target -- rm /tmp/chrome.deb
+
+    # -------------------------------------------------------------------------
+    # 5. Flatpak — add Flathub as system-wide remote
+    # -------------------------------------------------------------------------
+    - curtin in-target -- flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+    # -------------------------------------------------------------------------
+    # 6. Homebrew — cannot run reliably inside the installer chroot, so we
+    #    install it via a one-shot systemd service on first boot instead.
+    #    The ConditionPathExists guard prevents it running on subsequent boots.
+    # -------------------------------------------------------------------------
+    - |
+      cat <<'SCRIPT' > /target/usr/local/bin/install-homebrew.sh
+      #!/bin/bash
+      set -euo pipefail
+      NONINTERACTIVE=1 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+      echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> "${HOME}/.bashrc"
+      echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> "${HOME}/.profile"
+      SCRIPT
+      chmod +x /target/usr/local/bin/install-homebrew.sh
+    - |
+      cat <<'UNIT' > /target/etc/systemd/system/install-homebrew.service
+      [Unit]
+      Description=Install Homebrew (Linux) for developer user
+      After=network-online.target
+      Wants=network-online.target
+      ConditionPathExists=!/home/linuxbrew/.linuxbrew/bin/brew
+
+      [Service]
+      Type=oneshot
+      User=engineer
+      ExecStart=/usr/local/bin/install-homebrew.sh
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+      UNIT
+    - curtin in-target -- systemctl enable install-homebrew.service

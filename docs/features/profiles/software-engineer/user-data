@@ -85,6 +85,7 @@ autoinstall:
       NONINTERACTIVE=1 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
       echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> "${HOME}/.bashrc"
       echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> "${HOME}/.profile"
+      systemctl disable install-homebrew.service
       SCRIPT
       chmod +x /target/usr/local/bin/install-homebrew.sh
     - |

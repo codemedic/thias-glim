@@ -19,7 +19,6 @@ autoinstall:
     - gpg
     - ca-certificates
     - flatpak
-    - software-properties-common  # provides add-apt-repository
     - procps                    # required by Homebrew on Linux
     - file                      # required by Homebrew on Linux
 
@@ -32,21 +31,7 @@ autoinstall:
     - curtin in-target -- apt-mark hold snapd
 
     # -------------------------------------------------------------------------
-    # 2. Firefox — native .deb via Mozilla Team PPA (replaces snap version)
-    #    Pin priority 1001 ensures apt always prefers this over any snap shim.
-    # -------------------------------------------------------------------------
-    - curtin in-target -- add-apt-repository -y ppa:mozillateam/ppa
-    - |
-      cat <<'EOF' | tee /target/etc/apt/preferences.d/mozilla-firefox
-      Package: firefox*
-      Pin: release o=LP-PPA-mozillateam
-      Pin-Priority: 1001
-      EOF
-    - curtin in-target -- apt-get update
-    - curtin in-target -- apt-get install -y firefox
-
-    # -------------------------------------------------------------------------
-    # 3. Docker CE — official Docker repository
+    # 2. Docker CE — official Docker repository
     #    Uses the target's VERSION_CODENAME so this works across Ubuntu releases.
     # -------------------------------------------------------------------------
     - curtin in-target -- install -m 0755 -d /etc/apt/keyrings

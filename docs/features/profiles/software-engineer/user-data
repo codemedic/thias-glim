@@ -70,7 +70,7 @@ autoinstall:
     - curtin in-target -- flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
     # -------------------------------------------------------------------------
-    # 6. Homebrew — cannot run reliably inside the installer chroot, so we
+    # 7. Homebrew — cannot run reliably inside the installer chroot, so we
     #    install it via a one-shot systemd service on first boot instead.
     #    Pre-create the prefix directory as root so the installer does not need
     #    sudo when it runs as the unprivileged user on first boot.

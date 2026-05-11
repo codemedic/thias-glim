@@ -54,7 +54,7 @@ autoinstall:
     - curtin in-target -- rm /tmp/chrome.deb
 
     # -------------------------------------------------------------------------
-    # 5. Suppress auto-mount of the CIDATA seed disk on the installed system.
+    # 4. Suppress auto-mount of the CIDATA seed disk on the installed system.
     #    Prevents udisks2 showing a CIDATA drive icon on the desktop when the
     #    seed disk is still attached (e.g. during VM testing). Cloud-init reads
     #    it before the desktop starts so this has no effect on the install.
@@ -65,12 +65,12 @@ autoinstall:
       EOF
 
     # -------------------------------------------------------------------------
-    # 6. Flatpak — add Flathub as system-wide remote
+    # 5. Flatpak — add Flathub as system-wide remote
     # -------------------------------------------------------------------------
     - curtin in-target -- flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
     # -------------------------------------------------------------------------
-    # 7. Homebrew — cannot run reliably inside the installer chroot, so we
+    # 6. Homebrew — cannot run reliably inside the installer chroot, so we
     #    install it via a one-shot systemd service on first boot instead.
     #    Pre-create the prefix directory as root so the installer does not need
     #    sudo when it runs as the unprivileged user on first boot.

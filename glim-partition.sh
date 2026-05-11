@@ -14,6 +14,7 @@
 #   P2: 256 MiB EFI System Partition (type ef00, FAT32)
 #   P3: [rest]  GLIM data partition  (ext4, label GLIM)
 #   P4: [SIZE]  User storage         (exFAT by default, label GLIMDATA, optional)
+#   Px: 16 MiB  Autoinstall seed     (FAT16, label CIDATA, optional, always last)
 #
 # This script is destructive. All data on the target device will be lost.
 #
@@ -24,7 +25,7 @@ set -euo pipefail
 # Output: prints usage text to stdout
 usage() {
   cat <<EOF
-Usage: $(basename "$0") /dev/sdX [--gpt] [--data-size SIZE] [--data-fs exfat|ext4]
+Usage: $(basename "$0") /dev/sdX [--gpt] [--data-size SIZE] [--data-fs exfat|ext4] [--cidata]
 
   /dev/sdX             Target block device (entire disk, not a partition)
   --gpt                Create a GPT layout with a dedicated EFI System
@@ -35,6 +36,9 @@ Usage: $(basename "$0") /dev/sdX [--gpt] [--data-size SIZE] [--data-fs exfat|ext
   --data-fs exfat|ext4 Filesystem for the GLIMDATA partition (default: exfat).
                        exFAT: readable on Windows, macOS, and Linux — no file
                        size limit. ext4: Linux-only, journaled.
+  --cidata             Create a 16 MiB FAT16 CIDATA partition (implies --gpt).
+                       cloud-init auto-detects it as the autoinstall seed source.
+                       Copy user-data + meta-data to its root before deploying.
 
 Default layout (no --gpt):
   P1: FAT32 (label GLIM, full disk)   — simple, universal
@@ -44,6 +48,7 @@ GPT layout (--gpt):
   P2: 256 MiB EFI System Partition (type ef00, FAT32)
   P3: [rest]  GLIM (ext4, label GLIM)
   P4: [SIZE]  GLIMDATA (exFAT by default, label GLIMDATA) -- only with --data-size
+  Px: 16 MiB  CIDATA (FAT16, label CIDATA, always last)   -- only with --cidata
 
 WARNING: This script will erase all data on the target device.
 
@@ -67,6 +72,7 @@ main() {
   local gpt=false
   local data_size=""
   local data_fs="exfat"
+  local cidata=false
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
@@ -89,6 +95,10 @@ main() {
         ;;
       --data-fs=*)
         data_fs="${1#*=}"
+        shift
+        ;;
+      --cidata)
+        cidata=true
         shift
         ;;
       -h|--help)
@@ -127,6 +137,12 @@ main() {
   # --data-size implies --gpt (data partition requires multi-partition GPT)
   if [[ -n "$data_size" && "$gpt" == false ]]; then
     echo "Note: --data-size implies --gpt; enabling GPT layout."
+    gpt=true
+  fi
+
+  # --cidata implies --gpt
+  if [[ "$cidata" == true && "$gpt" == false ]]; then
+    echo "Note: --cidata implies --gpt; enabling GPT layout."
     gpt=true
   fi
 
@@ -184,9 +200,15 @@ main() {
     echo "This will create the following GPT layout on $device:"
     echo "  P1: 1 MiB   BIOS Boot Partition (type ef02)"
     echo "  P2: 256 MiB EFI System Partition (type ef00, FAT32)"
-    echo "  P3: [remaining${data_size:+ minus $data_size}] GLIM (ext4, label GLIM)"
+    local remaining_desc="remaining"
+    [[ -n "$data_size" ]] && remaining_desc+=" minus $data_size"
+    [[ "$cidata" == true ]] && remaining_desc+=" minus 16 MiB"
+    echo "  P3: [$remaining_desc] GLIM (ext4, label GLIM)"
     if [[ -n "$data_size" ]]; then
-      echo "  P4: $data_size  Data ($data_fs, label GLIMDATA)"
+      echo "  P4: $data_size  GLIMDATA ($data_fs, label GLIMDATA)"
+    fi
+    if [[ "$cidata" == true ]]; then
+      echo "  P$( [[ -n "$data_size" ]] && echo 5 || echo 4 ): 16 MiB  CIDATA (FAT16, label CIDATA)"
     fi
   else
     echo "This will create the following layout on $device:"
@@ -215,7 +237,7 @@ main() {
   fi
 
   if [[ "$gpt" == true ]]; then
-    _partition_gpt "$device" "$part_prefix" "$data_size" "$data_fs"
+    _partition_gpt "$device" "$part_prefix" "$data_size" "$data_fs" "$cidata"
   else
     _partition_simple "$device" "$part_prefix"
   fi
@@ -230,8 +252,14 @@ main() {
     echo "  1. Mount the GLIM partition:  sudo mount $glim /mnt"
     echo "  2. Install GLIM:              ./glim.sh"
     echo "  3. Populate ISOs:             /mnt/boot/iso/<distro>/"
+    local next_step=4
     if [[ -n "$data_size" ]]; then
-      echo "  4. Data partition ready:      ${part_prefix}4 (label GLIMDATA, $data_fs)"
+      echo "  ${next_step}. Data partition ready:      ${part_prefix}4 (label GLIMDATA, $data_fs)"
+      (( next_step++ ))
+    fi
+    if [[ "$cidata" == true ]]; then
+      local cidata_part="${part_prefix}$( [[ -n "$data_size" ]] && echo 5 || echo 4 )"
+      echo "  ${next_step}. Copy autoinstall seed:      mount $cidata_part /mnt/cidata && cp user-data meta-data /mnt/cidata/"
     fi
   else
     local glim="${part_prefix}1"
@@ -276,18 +304,44 @@ _partition_simple() {
   sudo udevadm settle
 }
 
-# _partition_gpt DEVICE PART_PREFIX DATA_SIZE DATA_FS
-# Create a GPT layout: BIOS Boot + ESP + ext4 GLIM [+ GLIMDATA in DATA_FS format].
+# _size_to_sectors SIZE_STRING
+# Convert a human-readable size (e.g. "32G", "512M") to 512-byte sector count.
+# Supports K, M, G, T suffixes (case-insensitive). Used to compute combined
+# end offsets when multiple variable-size partitions are laid out with sgdisk.
+_size_to_sectors() {
+  local size="${1^^}"
+  local value="${size%[TGMK]}"
+  local unit="${size: -1}"
+  case "$unit" in
+    T) echo $(( value * 2 * 1024 * 1024 * 1024 )) ;;
+    G) echo $(( value * 2 * 1024 * 1024 )) ;;
+    M) echo $(( value * 2 * 1024 )) ;;
+    K) echo $(( value * 2 )) ;;
+    *) echo "$value" ;;
+  esac
+}
+
+# _partition_gpt DEVICE PART_PREFIX DATA_SIZE DATA_FS CIDATA
+# Create a GPT layout: BIOS Boot + ESP + ext4 GLIM [+ GLIMDATA] [+ CIDATA].
 # DATA_FS is only used when DATA_SIZE is non-empty; accepted values: exfat, ext4.
+# CIDATA partition is 16 MiB FAT16, always the last partition.
 _partition_gpt() {
   local device="$1"
   local part_prefix="$2"
   local data_size="$3"
   local data_fs="$4"
+  local cidata="${5:-false}"
 
   local esp="${part_prefix}2"
   local glim="${part_prefix}3"
   local data="${part_prefix}4"
+  # CIDATA is P4 when no data partition, P5 when data partition exists
+  local cidata_part
+  if [[ -n "$data_size" ]]; then
+    cidata_part="${part_prefix}5"
+  else
+    cidata_part="${part_prefix}4"
+  fi
 
   # Zap any existing partition table first, in a separate pass.
   # Combined -Z + partition args fail if the existing GPT is corrupted
@@ -312,14 +366,43 @@ _partition_gpt() {
     -c "2:ESP"
   )
 
-  if [[ -n "$data_size" ]]; then
+  if [[ -n "$data_size" && "$cidata" == true ]]; then
+    # P3: GLIM, P4: GLIMDATA, P5: CIDATA (last)
+    # P3 must leave room for both GLIMDATA and the 16 MiB CIDATA.
+    # sgdisk negative-end notation is in sectors (no suffix) or with M/G suffix.
+    # Compute combined offset: data_size sectors + 16 MiB sectors.
+    local data_s cidata_s combined_s
+    data_s=$(_size_to_sectors "$data_size")
+    cidata_s=$(( 16 * 1024 * 1024 / 512 ))   # 16 MiB in 512-byte sectors
+    combined_s=$(( data_s + cidata_s ))
+    sgdisk_args+=(
+      -n "3:0:-${combined_s}" # P3: GLIM (leaves room for GLIMDATA + CIDATA)
+      -t "3:8300"
+      -c "3:GLIM"
+      -n "4:0:-16M"           # P4: GLIMDATA (fills up to 16 MiB before disk end)
+      -t "4:8300"
+      -c "4:GLIMDATA"
+      -n "5:0:0"              # P5: CIDATA (fills last 16 MiB)
+      -t "5:8300"
+      -c "5:CIDATA"
+    )
+  elif [[ -n "$data_size" ]]; then
     sgdisk_args+=(
       -n "3:0:-${data_size}" # P3: GLIM (all remaining minus data partition)
       -t "3:8300"
       -c "3:GLIM"
-      -n "4:0:0"             # P4: Data (fill the rest)
+      -n "4:0:0"             # P4: GLIMDATA (fill the rest)
       -t "4:8300"
       -c "4:GLIMDATA"
+    )
+  elif [[ "$cidata" == true ]]; then
+    sgdisk_args+=(
+      -n "3:0:-16M"          # P3: GLIM (all remaining minus 16 MiB for CIDATA)
+      -t "3:8300"
+      -c "3:GLIM"
+      -n "4:0:0"             # P4: CIDATA (fill the last 16 MiB)
+      -t "4:8300"
+      -c "4:CIDATA"
     )
   else
     sgdisk_args+=(
@@ -351,6 +434,14 @@ _partition_gpt() {
   if ! sudo mkfs.ext4 -L GLIM "$glim"; then
     echo "ERROR: Failed to format GLIM partition."
     exit 1
+  fi
+
+  if [[ "$cidata" == true ]]; then
+    echo "  CIDATA (FAT16): $cidata_part"
+    if ! sudo mkfs.vfat -F 16 -n CIDATA "$cidata_part"; then
+      echo "ERROR: Failed to format CIDATA partition."
+      exit 1
+    fi
   fi
 
   if [[ -n "$data_size" ]]; then

@@ -76,8 +76,11 @@ autoinstall:
     # -------------------------------------------------------------------------
     # 6. Homebrew — cannot run reliably inside the installer chroot, so we
     #    install it via a one-shot systemd service on first boot instead.
-    #    The ConditionPathExists guard prevents it running on subsequent boots.
+    #    Pre-create the prefix directory as root so the installer does not need
+    #    sudo when it runs as the unprivileged user on first boot.
     # -------------------------------------------------------------------------
+    - curtin in-target -- mkdir -p /home/linuxbrew/.linuxbrew
+    - curtin in-target -- chown -R engineer /home/linuxbrew  # TODO: match username
     - |
       cat <<'SCRIPT' > /target/usr/local/bin/install-homebrew.sh
       #!/bin/bash

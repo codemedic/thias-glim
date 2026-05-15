@@ -211,3 +211,18 @@ if [[ ! -O "${USBMNT}" ]]; then
   sudo chown -R "$(id -u):$(id -g)" "${USBMNT}"
 fi
 
+# Copy the deploy script so it's available directly from the USB stick
+if [[ -f "$(dirname "$0")/deploy-profile.sh" ]]; then
+  echo "Copying deploy-profile.sh to ${USBMNT}/ ..."
+  ${CMD_PREFIX} cp "$(dirname "$0")/deploy-profile.sh" "${USBMNT}/deploy-profile.sh"
+  ${CMD_PREFIX} chmod +x "${USBMNT}/deploy-profile.sh"
+fi
+
+# Sync autoinstall templates and resources so deploy-profile.sh can find them
+AUTOINSTALL_SRC="$(dirname "$0")/autoinstall"
+if [[ -d "${AUTOINSTALL_SRC}" ]]; then
+  echo "Syncing autoinstall/ to ${USBMNT}/autoinstall/ ..."
+  ${CMD_PREFIX} mkdir -p "${USBMNT}/autoinstall"
+  ${CMD_PREFIX} rsync -rt --delete --exclude='resources/' "${AUTOINSTALL_SRC}/" "${USBMNT}/autoinstall/"
+fi
+

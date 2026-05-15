@@ -1,0 +1,8 @@
+# Resource files are admin-supplied and must not be committed.
+# Copy them onto the USB stick (or working tree) manually.
+*.ovpn
+*.key
+*.crt
+*.pem
+*.p12
+*.pfx

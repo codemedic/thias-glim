@@ -1,0 +1,176 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_GB.UTF-8
+  keyboard:
+    layout: gb
+
+  identity:
+    hostname: "{{hostname}}"
+    username: "{{username}}"
+    password: "{{password_hash}}"
+
+  # early-commands runs before partitioning and package installation.
+  # Use it to gate the install on prerequisites that must be true from the start.
+  early-commands:
+    # -------------------------------------------------------------------------
+    # Internet connectivity check — retry for up to 5 minutes.
+    # Package installation (apt) requires internet. Failing here is cleaner
+    # than failing mid-install with a cryptic apt error. An admin who forgot
+    # to plug in ethernet has until now to do so.
+    # Probes 1.1.1.1 (Cloudflare DNS) on port 53 — no DNS resolution needed.
+    # -------------------------------------------------------------------------
+    - |
+      echo "Checking internet connectivity..."
+      ATTEMPTS=0
+      MAX_ATTEMPTS=30
+      until nc -zw3 1.1.1.1 53 2>/dev/null; do
+        ATTEMPTS=$(( ATTEMPTS + 1 ))
+        if [ "${ATTEMPTS}" -ge "${MAX_ATTEMPTS}" ]; then
+          echo "ERROR: No internet connection after 5 minutes. Connect an ethernet cable and re-run the install."
+          exit 1
+        fi
+        echo "  No connection yet — connect an ethernet cable. Retrying in 10 s (${ATTEMPTS}/${MAX_ATTEMPTS})..."
+        sleep 10
+      done
+      echo "Internet connection confirmed."
+
+  # Standard apt packages — installed into the target before late-commands run
+  packages:
+    - build-essential           # gcc, g++, make, libc-dev, etc.
+    - curl
+    - wget
+    - git                       # required by Homebrew
+    - gpg
+    - ca-certificates
+    - flatpak
+    - procps                    # required by Homebrew on Linux
+    - file                      # required by Homebrew on Linux
+    - openvpn
+    - network-manager-openvpn-gnome
+
+  late-commands:
+
+    # -------------------------------------------------------------------------
+    # 1. Remove snapd — eliminates Firefox, Thunderbird and any other snaps
+    # -------------------------------------------------------------------------
+    - curtin in-target -- apt-get purge -y snapd
+    - curtin in-target -- apt-mark hold snapd
+
+    # -------------------------------------------------------------------------
+    # 2. Docker CE — official Docker repository
+    #    Uses the target's VERSION_CODENAME so this works across Ubuntu releases.
+    # -------------------------------------------------------------------------
+    - curtin in-target -- install -m 0755 -d /etc/apt/keyrings
+    - curtin in-target -- curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    - curtin in-target -- chmod a+r /etc/apt/keyrings/docker.asc
+    - |
+      . /target/etc/os-release
+      echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+        | tee /target/etc/apt/sources.list.d/docker.list
+    - curtin in-target -- apt-get update
+    - curtin in-target -- apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    - curtin in-target -- usermod -aG docker {{username}}
+
+    # -------------------------------------------------------------------------
+    # 3. Google Chrome — downloads current stable .deb which also registers
+    #    the Google apt repo, so future updates are handled by apt.
+    # -------------------------------------------------------------------------
+    - curtin in-target -- wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb
+    - curtin in-target -- apt-get install -y /tmp/chrome.deb
+    - curtin in-target -- rm /tmp/chrome.deb
+
+    # -------------------------------------------------------------------------
+    # 4. Suppress auto-mount of the CIDATA seed disk on the installed system.
+    #    Prevents udisks2 showing a CIDATA drive icon on the desktop when the
+    #    seed disk is still attached (e.g. during VM testing). Cloud-init reads
+    #    it before the desktop starts so this has no effect on the install.
+    # -------------------------------------------------------------------------
+    - |
+      cat <<'EOF' > /target/etc/udev/rules.d/99-no-cidata-automount.rules
+      ENV{ID_FS_LABEL}=="CIDATA", ENV{UDISKS_AUTO}="0"
+      EOF
+
+    # -------------------------------------------------------------------------
+    # 5. Flatpak — add Flathub as system-wide remote
+    # -------------------------------------------------------------------------
+    - curtin in-target -- flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+    # -------------------------------------------------------------------------
+    # 6. Homebrew — cannot run reliably inside the installer chroot, so we
+    #    install it via a one-shot systemd service on first boot instead.
+    #    Pre-create the prefix directory as root so the installer does not need
+    #    sudo when it runs as the unprivileged user on first boot.
+    # -------------------------------------------------------------------------
+    - curtin in-target -- mkdir -p /home/linuxbrew/.linuxbrew
+    - curtin in-target -- chown -R {{username}} /home/linuxbrew
+    - |
+      cat <<'SCRIPT' > /target/usr/local/bin/install-homebrew.sh
+      #!/bin/bash
+      set -euo pipefail
+      NONINTERACTIVE=1 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+      echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> "${HOME}/.bashrc"
+      echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> "${HOME}/.profile"
+      systemctl disable install-homebrew.service
+      SCRIPT
+      chmod +x /target/usr/local/bin/install-homebrew.sh
+    - |
+      cat <<'UNIT' > /target/etc/systemd/system/install-homebrew.service
+      [Unit]
+      Description=Install Homebrew (Linux) for developer user
+      After=network-online.target
+      Wants=network-online.target
+      ConditionPathExists=!/home/linuxbrew/.linuxbrew/bin/brew
+
+      [Service]
+      Type=oneshot
+      User={{username}}
+      ExecStart=/usr/local/bin/install-homebrew.sh
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+      UNIT
+    - curtin in-target -- systemctl enable install-homebrew.service
+
+    # -------------------------------------------------------------------------
+    # 7. OpenVPN — corporate UK and US connections
+    #    Config files are delivered by cloud-init write_files on first boot
+    #    (see # __RESOURCES__ below). This section sets up the NM import service
+    #    that imports them into NetworkManager once NetworkManager is running.
+    #    Password NOT stored — prompted at connect time (auth-user-pass).
+    # -------------------------------------------------------------------------
+    - curtin in-target -- mkdir -p /etc/openvpn/client
+    - |
+      cat <<'SCRIPT' > /target/usr/local/bin/install-vpn.sh
+      #!/bin/bash
+      set -euo pipefail
+      nmcli connection import type openvpn file /etc/openvpn/client/corp-vpn-uk.ovpn
+      nmcli connection import type openvpn file /etc/openvpn/client/corp-vpn-us.ovpn
+      systemctl disable install-vpn.service
+      SCRIPT
+      chmod +x /target/usr/local/bin/install-vpn.sh
+    - |
+      cat <<'UNIT' > /target/etc/systemd/system/install-vpn.service
+      [Unit]
+      Description=Import corporate VPN connections into NetworkManager
+      After=NetworkManager.service
+      Wants=NetworkManager.service
+      ConditionPathExists=!/etc/NetworkManager/system-connections/corp-vpn-uk.nmconnection
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/install-vpn.sh
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+      UNIT
+    - curtin in-target -- systemctl enable install-vpn.service
+
+# __RESOURCES__
+# deploy-profile.sh replaces this line with a cloud-init write_files: block
+# assembled from the manifest. Resources are written on first boot before
+# any user services start.

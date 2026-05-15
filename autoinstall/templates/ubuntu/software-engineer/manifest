@@ -1,0 +1,11 @@
+# Manifest for software-engineer autoinstall profile.
+#
+# Format: embed <source-relative-to-resources/> <dest-on-target> [mode] [owner]
+# Defaults: mode=0644, owner=root:root
+# Files must exist under autoinstall/resources/ on the GLIM partition.
+
+# ── VPN configs — OpenVPN client configs for UK and US connections.
+#    Files are base64-encoded and delivered via cloud-init write_files, then
+#    imported into NetworkManager by install-vpn.service on first boot.
+embed vpn/corp-vpn-uk.ovpn /etc/openvpn/client/corp-vpn-uk.ovpn 0600 root:root
+embed vpn/corp-vpn-us.ovpn /etc/openvpn/client/corp-vpn-us.ovpn 0600 root:root

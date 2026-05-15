@@ -32,6 +32,16 @@ hash_password() {
   openssl passwd -6 -stdin
 }
 
+# Parse identity fields from an existing rendered user-data file.
+# Outputs: CURRENT_HOSTNAME, CURRENT_USERNAME, CURRENT_PASSWORD_HASH (exported).
+read_current_identity() {
+  local userdata="$1"
+  [[ -f "${userdata}" ]] || return 0
+  CURRENT_HOSTNAME="$(grep '^ *hostname:' "${userdata}" | sed 's/.*hostname: *"\(.*\)"/\1/')"
+  CURRENT_USERNAME="$(grep '^ *username:' "${userdata}" | sed 's/.*username: *"\(.*\)"/\1/')"
+  CURRENT_PASSWORD_HASH="$(grep '^ *password:' "${userdata}" | sed 's/.*password: *"\(.*\)"/\1/')"
+}
+
 apply_template() {
   local file="$1" hostname="$2" username="$3" password_hash="$4"
   sed \
@@ -148,25 +158,6 @@ for p in "${PROFILES[@]}"; do [[ "$p" == "$PROFILE" ]] && found=true && break; d
 
 PROFILE_DIR="${TEMPLATES_DIR}/${PROFILE}"
 
-# ── prompt for identity fields ─────────────────────────────────────────────────
-
-echo
-echo "Configuring profile: ${PROFILE}"
-
-read -rp "Hostname: " HOSTNAME
-[[ -n "${HOSTNAME}" ]] || die "Hostname cannot be empty"
-
-read -rp "Username: " USERNAME
-[[ -n "${USERNAME}" ]] || die "Username cannot be empty"
-
-read -rsp "Password (will be hashed with SHA-512): " PASSWORD; echo
-read -rsp "Confirm password: " PASSWORD2; echo
-[[ "${PASSWORD}" == "${PASSWORD2}" ]] || die "Passwords do not match"
-
-printf "Hashing password... "
-PASSWORD_HASH="$(printf '%s' "${PASSWORD}" | hash_password)"
-echo "done."
-
 # ── locate CIDATA mount ────────────────────────────────────────────────────────
 
 if [[ -z "${CIDATA_DIR}" ]]; then
@@ -178,6 +169,55 @@ if [[ -z "${CIDATA_DIR}" || ! -d "${CIDATA_DIR}" ]]; then
   echo "Mount it first or pass --cidata-dir:" >&2
   echo "  sudo mount /dev/disk/by-label/CIDATA /mnt && $0 --cidata-dir /mnt" >&2
   exit 1
+fi
+
+# ── load existing identity (if CIDATA already has a rendered user-data) ────────
+
+CURRENT_HOSTNAME=""
+CURRENT_USERNAME=""
+CURRENT_PASSWORD_HASH=""
+read_current_identity "${CIDATA_DIR}/user-data"
+
+# ── prompt for identity fields ─────────────────────────────────────────────────
+
+echo
+echo "Configuring profile: ${PROFILE}"
+[[ -n "${CURRENT_HOSTNAME}" ]] && echo "(Press Enter to keep current values)"
+
+if [[ -n "${CURRENT_HOSTNAME}" ]]; then
+  read -rp "Hostname [${CURRENT_HOSTNAME}]: " HOSTNAME
+  HOSTNAME="${HOSTNAME:-${CURRENT_HOSTNAME}}"
+else
+  read -rp "Hostname: " HOSTNAME
+fi
+[[ -n "${HOSTNAME}" ]] || die "Hostname cannot be empty"
+
+if [[ -n "${CURRENT_USERNAME}" ]]; then
+  read -rp "Username [${CURRENT_USERNAME}]: " USERNAME
+  USERNAME="${USERNAME:-${CURRENT_USERNAME}}"
+else
+  read -rp "Username: " USERNAME
+fi
+[[ -n "${USERNAME}" ]] || die "Username cannot be empty"
+
+if [[ -n "${CURRENT_PASSWORD_HASH}" ]]; then
+  read -rsp "Password [keep existing]: " PASSWORD; echo
+  if [[ -z "${PASSWORD}" ]]; then
+    PASSWORD_HASH="${CURRENT_PASSWORD_HASH}"
+  else
+    read -rsp "Confirm password: " PASSWORD2; echo
+    [[ "${PASSWORD}" == "${PASSWORD2}" ]] || die "Passwords do not match"
+    printf "Hashing password... "
+    PASSWORD_HASH="$(printf '%s' "${PASSWORD}" | hash_password)"
+    echo "done."
+  fi
+else
+  read -rsp "Password (will be hashed with SHA-512): " PASSWORD; echo
+  read -rsp "Confirm password: " PASSWORD2; echo
+  [[ "${PASSWORD}" == "${PASSWORD2}" ]] || die "Passwords do not match"
+  printf "Hashing password... "
+  PASSWORD_HASH="$(printf '%s' "${PASSWORD}" | hash_password)"
+  echo "done."
 fi
 
 # ── render and write seed files ────────────────────────────────────────────────
